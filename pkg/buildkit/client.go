@@ -234,9 +234,21 @@ func Du(ctx context.Context, cfg *config.Config, w io.Writer) error {
 	return nil
 }
 
+var start time.Time
+
+func startTicker() {
+	start = time.Now()
+}
+
+func tick(message string) {
+	fmt.Println(time.Since(start), message)
+}
+
 // newClient creates controller client based on the passed config.
 // optional debugController allows adding debugger support to the controller.
 func newClient(ctx context.Context, cfg *config.Config, debugController *debugController) (_ *client.Client, _ func(), retErr error) {
+	startTicker()
+
 	if cfg.Root == "" {
 		return nil, nil, fmt.Errorf("root directory must be specified")
 	}
@@ -253,28 +265,40 @@ func newClient(ctx context.Context, cfg *config.Config, debugController *debugCo
 	}()
 
 	// Initialize OCI worker with debugging support
+	tick("about to init worker")
 	w, resolverFunc, err := newWorker(ctx, cfg)
+	tick("done init worker")
 	if err != nil {
 		return nil, nil, err
 	}
 	if debugController != nil {
+		tick("about to init debugWorker")
 		w = debugController.debugWorker(w)
+		tick("done init debugWorker")
 	}
+	tick("add controller")
 	wc := &worker.Controller{}
 	if err := wc.Add(w); err != nil {
 		return nil, nil, err
 	}
+	tick("done add controller")
 
 	// Create controller
+	tick("create manager")
 	sessionManager, err := session.NewManager()
+	tick("done create manager")
 	if err != nil {
 		return nil, nil, err
 	}
+	tick("create boltstore")
 	cacheStorage, err := bboltcachestorage.NewStore(filepath.Join(cfg.Root, "cache.db"))
+	tick("done creating bolt")
 	if err != nil {
 		return nil, nil, err
 	}
+	tick("create gateway")
 	gwfrontend := gateway.NewGatewayFrontend(wc)
+	tick("done create gateway")
 	if debugController != nil {
 		gwfrontend = debugController.frontendWithDebug(gwfrontend)
 	}
@@ -284,6 +308,7 @@ func newClient(ctx context.Context, cfg *config.Config, debugController *debugCo
 		"registry": registryremotecache.ResolveCacheImporterFunc(sessionManager, w.ContentStore(), resolverFunc),
 		"local":    localremotecache.ResolveCacheImporterFunc(sessionManager),
 	}
+	tick("create controller")
 	controller, err := control.NewController(control.Opt{
 		SessionManager:            sessionManager,
 		WorkerController:          wc,
@@ -293,21 +318,28 @@ func newClient(ctx context.Context, cfg *config.Config, debugController *debugCo
 		ResolveCacheExporterFuncs: map[string]remotecache.ResolveCacheExporterFunc{}, // TODO: support remote cahce exporter
 		Entitlements:              []string{},                                        // TODO
 	})
+	tick("done create controller")
 	if err != nil {
 		return nil, nil, err
 	}
 
+	tick("create GPC server")
 	// Create client for the controller
 	controlServer := grpc.NewServer(grpc.UnaryInterceptor(grpcerrors.UnaryServerInterceptor), grpc.StreamInterceptor(grpcerrors.StreamServerInterceptor))
 	controller.Register(controlServer)
+	tick("done create GPC server")
+	tick("create pipe listenr")
 	lt := newPipeListener()
+	tick("done create pipelinster")
 	go controlServer.Serve(lt)
 	closeFuncs = append(closeFuncs, controlServer.GracefulStop)
+	tick("create new client")
 	c, err := client.New(ctx, "", client.WithContextDialer(lt.dial))
 	if err != nil {
 		return nil, nil, err
 	}
 
+	tick("done create new client")
 	return c, done, nil
 }
 
@@ -318,12 +350,14 @@ func newWorker(ctx context.Context, cfg *config.Config) (worker.Worker, docker.R
 	}
 	snName := cfg.Workers.OCI.Snapshotter
 	if snName == "auto" {
+		tick("check if supported")
 		if err := overlayutils.Supported(root); err == nil {
 			snName = "overlayfs"
 		} else {
 			logrus.Debugf("overlayfs isn't supported. falling back to native snapshotter")
 			snName = "native"
 		}
+		tick("done check if supported")
 		logrus.Debugf("%q is used as the auto snapshotter", snName)
 	}
 	var snFactory runc.SnapshotterFactory
@@ -337,6 +371,7 @@ func newWorker(ctx context.Context, cfg *config.Config) (worker.Worker, docker.R
 		snFactory = runc.SnapshotterFactory{
 			Name: snName,
 			New: func(root string) (ctdsnapshots.Snapshotter, error) {
+				tick("new snap")
 				return overlay.NewSnapshotter(root, overlay.AsynchronousRemove)
 			},
 		}
@@ -352,13 +387,19 @@ func newWorker(ctx context.Context, cfg *config.Config) (worker.Worker, docker.R
 			BinaryDir:  cfg.Workers.OCI.CNIBinaryPath,
 		},
 	}
+	tick("about to start worker")
 	opt, err := runc.NewWorkerOpt(root, snFactory, rootless, oci.ProcessSandbox, nil, nil, nc, nil, "", "", nil, "", "")
+	tick("done with start worker")
 	if err != nil {
 		return nil, nil, err
 	}
+	tick("create reg config")
 	resolverFunc := resolver.NewRegistryConfig(cfg.Registries)
+	tick("done create reg config")
 	opt.RegistryHosts = resolverFunc
+	tick("create worker")
 	w, err := base.NewWorker(ctx, opt)
+	tick("WE ARE IN")
 	if err != nil {
 		return nil, nil, err
 	}
